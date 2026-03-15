@@ -87,10 +87,11 @@ function scanYaml(filePath: string, site: string): ManifestEntry | null {
 
 function scanTs(filePath: string, site: string): ManifestEntry {
   // TS adapters self-register via cli() at import time.
-  // We record their module path for lazy dynamic import.
+  // We statically parse the source to extract metadata for the manifest stub.
   const baseName = path.basename(filePath, path.extname(filePath));
   const relativePath = `${site}/${baseName}.js`;
-  return {
+
+  const entry: ManifestEntry = {
     site,
     name: baseName,
     description: '',
@@ -100,6 +101,66 @@ function scanTs(filePath: string, site: string): ManifestEntry {
     type: 'ts',
     modulePath: relativePath,
   };
+
+  try {
+    const src = fs.readFileSync(filePath, 'utf-8');
+
+    // Extract description
+    const descMatch = src.match(/description\s*:\s*['"`]([^'"`]*)['"`]/);
+    if (descMatch) entry.description = descMatch[1];
+
+    // Extract domain
+    const domainMatch = src.match(/domain\s*:\s*['"`]([^'"`]*)['"`]/);
+    if (domainMatch) entry.domain = domainMatch[1];
+
+    // Extract strategy
+    const stratMatch = src.match(/strategy\s*:\s*Strategy\.(\w+)/);
+    if (stratMatch) entry.strategy = stratMatch[1].toLowerCase();
+
+    // Extract columns
+    const colMatch = src.match(/columns\s*:\s*\[([^\]]*)\]/);
+    if (colMatch) {
+      entry.columns = colMatch[1].split(',').map(s => s.trim().replace(/^['"`]|['"`]$/g, '')).filter(Boolean);
+    }
+
+    // Extract args array items: { name: '...', ... }
+    const argsBlockMatch = src.match(/args\s*:\s*\[([\s\S]*?)\]\s*,/);
+    if (argsBlockMatch) {
+      const argsBlock = argsBlockMatch[1];
+      const argRegex = /\{\s*name\s*:\s*['"`](\w+)['"`]([^}]*)\}/g;
+      let m;
+      while ((m = argRegex.exec(argsBlock)) !== null) {
+        const argName = m[1];
+        const body = m[2];
+        const typeMatch = body.match(/type\s*:\s*['"`](\w+)['"`]/);
+        const defaultMatch = body.match(/default\s*:\s*([^,}]+)/);
+        const requiredMatch = body.match(/required\s*:\s*(true|false)/);
+        const helpMatch = body.match(/help\s*:\s*['"`]([^'"`]*)['"`]/);
+
+        let defaultVal: any = undefined;
+        if (defaultMatch) {
+          const raw = defaultMatch[1].trim();
+          if (raw === 'true') defaultVal = true;
+          else if (raw === 'false') defaultVal = false;
+          else if (/^\d+$/.test(raw)) defaultVal = parseInt(raw, 10);
+          else if (/^\d+\.\d+$/.test(raw)) defaultVal = parseFloat(raw);
+          else defaultVal = raw.replace(/^['"`]|['"`]$/g, '');
+        }
+
+        entry.args.push({
+          name: argName,
+          type: typeMatch?.[1] ?? 'str',
+          default: defaultVal,
+          required: requiredMatch?.[1] === 'true',
+          help: helpMatch?.[1] ?? '',
+        });
+      }
+    }
+  } catch {
+    // If parsing fails, fall back to empty metadata — module will self-register at runtime
+  }
+
+  return entry;
 }
 
 // Main
